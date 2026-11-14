@@ -128,8 +128,7 @@ bool forged_closed_polygon_image(const DrawObject *o, float *out_x, float *out_y
     int n = o->vert_count;
     if (n > MAX_POLY_VERTS) n = MAX_POLY_VERTS;
 
-    /* Self-closed check (zoom-independent: compare in viewport-space
-     * distance, same tolerance the tap-to-close gesture uses). */
+    /* 1. Self-closed check (zoom-independent viewport distance) — unchanged. */
     float dxr = o->verts_x[n - 1] - o->verts_x[0];
     float dyr = o->verts_y[n - 1] - o->verts_y[0];
     float dist_vp = sqrtf(dxr * dxr + dyr * dyr) * zoom_scale();
@@ -143,39 +142,57 @@ bool forged_closed_polygon_image(const DrawObject *o, float *out_x, float *out_y
         return true;
     }
 
-    /* Not self-closed — try closing via the centerline. */
-    if (!o->has_centerline) return false;
+    /* 2. Explicit centerline — kept for backward compatibility / for
+     * anyone who deliberately wants an asymmetric/offset axis. */
+    if (o->has_centerline) {
+        for (int i = 0; i < n; i++) {
+            out_x[i] = o->verts_x[i];
+            out_y[i] = o->verts_y[i];
+        }
+
+        float cx1 = o->cl_x1, cy1 = o->cl_y1, cx2 = o->cl_x2, cy2 = o->cl_y2;
+        float cdx = cx2 - cx1;
+
+        float last_x = o->verts_x[n - 1];
+        float first_x = o->verts_x[0];
+        float cy_last, cy_first;
+
+        if (fabsf(cdx) < 0.0001f) {
+            cy_last  = cy1;
+            cy_first = cy1;
+        } else {
+            float t_last  = (last_x  - cx1) / cdx;
+            float t_first = (first_x - cx1) / cdx;
+            cy_last  = cy1 + t_last  * (cy2 - cy1);
+            cy_first = cy1 + t_first * (cy2 - cy1);
+        }
+
+        out_x[n]     = last_x;   out_y[n]     = cy_last;
+        out_x[n + 1] = first_x;  out_y[n + 1] = cy_first;
+
+        *out_n = n + 2;
+        return true;
+    }
+
+    /* 3. NEW default — auto-mirror about the radial origin (X = 0).
+     * Every point, line-segment vertex, and arc sample the user drew
+     * gets a matching reflected twin at the same Z, negative Y, so the
+     * shape is closed (and therefore fillable/patternable) the instant
+     * a profile has 2+ points — no manual centerline step needed.
+     * Buffer-safe: caller arrays are sized MAX_POLY_VERTS + 2, so cap
+     * n such that 2n never exceeds that. */
+    int max_half = (MAX_POLY_VERTS + 2) / 2;
+    if (n > max_half) n = max_half;
 
     for (int i = 0; i < n; i++) {
         out_x[i] = o->verts_x[i];
         out_y[i] = o->verts_y[i];
     }
-
-    /* Project the profile's first/last X onto the centerline to get
-     * the Y (radial) value that closes the shape at each end. Handles
-     * a horizontal centerline (the common case) exactly, and degrades
-     * gracefully for a slightly tilted one via linear interpolation. */
-    float cx1 = o->cl_x1, cy1 = o->cl_y1, cx2 = o->cl_x2, cy2 = o->cl_y2;
-    float cdx = cx2 - cx1;
-
-    float last_x = o->verts_x[n - 1];
-    float first_x = o->verts_x[0];
-    float cy_last, cy_first;
-
-    if (fabsf(cdx) < 0.0001f) {
-        cy_last  = cy1;
-        cy_first = cy1;
-    } else {
-        float t_last  = (last_x  - cx1) / cdx;
-        float t_first = (first_x - cx1) / cdx;
-        cy_last  = cy1 + t_last  * (cy2 - cy1);
-        cy_first = cy1 + t_first * (cy2 - cy1);
+    for (int i = 0; i < n; i++) {
+        out_x[n + i] =  o->verts_x[n - 1 - i];
+        out_y[n + i] = -o->verts_y[n - 1 - i];   /* mirrored twin */
     }
-
-    out_x[n]     = last_x;   out_y[n]     = cy_last;
-    out_x[n + 1] = first_x;  out_y[n + 1] = cy_first;
-
-    *out_n = n + 2;
+    *out_n = n * 2;
     return true;
 }
 
@@ -477,6 +494,52 @@ static void draw_outlined_hline(lv_layer_t *layer,
     draw_line_seg(layer, (int32_t)x_left,  (int32_t)y_bot,       (int32_t)x_right, (int32_t)y_bot,       col, lw);
 }*/
 
+// static void draw_pipe_profile(lv_layer_t *layer,
+//                               float vx1, float vy1,
+//                               float vx2, float vy2,
+//                               float id_px,
+//                               lv_color_t outer_col,
+//                               lv_color_t inner_col,
+//                               lv_color_t center_col,
+//                               lv_color_t fill_col,
+//                               lv_color_t hatch_col,
+//                               int32_t lw)
+// {
+//     (void)inner_col;
+
+//     float x_left  = LV_MIN(vx1, vx2);
+//     float x_right = LV_MAX(vx1, vx2);
+//     float y_top   = LV_MIN(vy1, vy2);
+//     float y_bot   = LV_MAX(vy1, vy2);
+//     float outer_h = y_bot - y_top;
+//     float inner_h = LV_MIN(id_px, outer_h);
+//     float y_center = y_top + outer_h * 0.5f;
+//     float y_inner_top = y_top + (outer_h - inner_h) * 0.5f;
+//     float y_inner_bot = y_inner_top + inner_h;
+
+//     lv_color_t id_line_col = lv_color_hex(0x000000);
+
+//     if (g_show_stock_fill) {
+//         /* Upper half: fill + lines 1 & 2 — shown only when SHOW */
+//         lv_area_t upper = {(int32_t)x_left, (int32_t)y_top,
+//                            (int32_t)x_right, (int32_t)y_center};
+//         draw_quick_rect(layer, fill_col, LV_OPA_COVER, &upper);
+
+//         draw_outlined_hline(layer, (int32_t)x_left, (int32_t)y_top,       (int32_t)x_right, (int32_t)y_top,       outer_col,   lw); /* line 1 */
+//         draw_outlined_hline(layer, (int32_t)x_left, (int32_t)y_inner_top, (int32_t)x_right, (int32_t)y_inner_top, id_line_col, lw); /* line 2 */
+//     }
+
+//     /* Lower half: hatch + lines 3, 4, 5 — always shown */
+//     draw_zigzag_box_fill(layer,
+//                          (int32_t)x_left, (int32_t)y_center,
+//                          (int32_t)x_right, (int32_t)y_bot,
+//                          hatch_col, 8);
+
+//     draw_outlined_hline(layer, (int32_t)x_left, (int32_t)y_center,    (int32_t)x_right, (int32_t)y_center,    center_col,  1);  /* line 3 */
+//     draw_outlined_hline(layer, (int32_t)x_left, (int32_t)y_inner_bot, (int32_t)x_right, (int32_t)y_inner_bot, id_line_col, lw); /* line 4 */
+//     draw_outlined_hline(layer, (int32_t)x_left, (int32_t)y_bot,       (int32_t)x_right, (int32_t)y_bot,       outer_col,   lw); /* line 5 */
+// }
+
 static void draw_pipe_profile(lv_layer_t *layer,
                               float vx1, float vy1,
                               float vx2, float vy2,
@@ -503,18 +566,20 @@ static void draw_pipe_profile(lv_layer_t *layer,
     lv_color_t id_line_col = lv_color_hex(0x000000);
 
     if (g_show_stock_fill) {
-        /* Upper half: fill + lines 1 & 2 — shown only when SHOW */
+        /* Upper WALL only: OD top -> ID top. Never paint past y_inner_top —
+         * that's the hollow bore and must stay canvas-colored. */
         lv_area_t upper = {(int32_t)x_left, (int32_t)y_top,
-                           (int32_t)x_right, (int32_t)y_center};
+                           (int32_t)x_right, (int32_t)y_inner_top};
         draw_quick_rect(layer, fill_col, LV_OPA_COVER, &upper);
 
         draw_outlined_hline(layer, (int32_t)x_left, (int32_t)y_top,       (int32_t)x_right, (int32_t)y_top,       outer_col,   lw); /* line 1 */
         draw_outlined_hline(layer, (int32_t)x_left, (int32_t)y_inner_top, (int32_t)x_right, (int32_t)y_inner_top, id_line_col, lw); /* line 2 */
     }
 
-    /* Lower half: hatch + lines 3, 4, 5 — always shown */
+    /* Lower WALL only: ID bottom -> OD bottom. The bore
+     * [y_inner_top, y_inner_bot] gets no fill/hatch at all — hollow. */
     draw_zigzag_box_fill(layer,
-                         (int32_t)x_left, (int32_t)y_center,
+                         (int32_t)x_left, (int32_t)y_inner_bot,
                          (int32_t)x_right, (int32_t)y_bot,
                          hatch_col, 8);
 
@@ -666,7 +731,7 @@ void h_ruler_draw_cb(lv_event_t *e)
     float sub_step_mm = step_mm / 10.0f; 
 
     float start_mm = floorf((-g.offset_x) / ppmm / sub_step_mm) * sub_step_mm;
-    start_mm = fmaxf(start_mm, 0.0f);
+    // start_mm = fmaxf(start_mm, 0.0f);
     float end_mm = start_mm + (w / ppmm) + step_mm;
 
     lv_draw_line_dsc_t line;
@@ -810,7 +875,7 @@ static void draw_grid(lv_layer_t *layer, lv_area_t *coords,
     float major_mm_y = nice_interval(ppy, 10.0f, MIN_GAP_PX_MAJOR);
     float minor_mm_y = nice_interval(ppy, 1.0f,  MIN_GAP_PX_MINOR);
     float mm_start_y = floorf((-g.offset_y) / (minor_mm_y * ppy)) * minor_mm_y;
-    mm_start_y = fmaxf(mm_start_y, 0.0f);
+    // mm_start_y = fmaxf(mm_start_y, 0.0f);
     float mm_end_y   = mm_start_y + (CH / ppy) + minor_mm_y;
     for (float mm = mm_start_y; mm <= mm_end_y; mm += minor_mm_y) {
         float sy = g.offset_y + mm * ppy;
@@ -997,6 +1062,22 @@ static void draw_committed_objects(lv_layer_t *layer, int32_t ox, int32_t oy)
                     if (self_closed) {
                         draw_line_seg(layer, (int32_t)vx[vn-1], (int32_t)vy[vn-1],
                                     (int32_t)vx[0], (int32_t)vy[0], line_col, line_w);
+                    }
+
+                    /* NEW: default symmetric mode — mirror the drawn
+                     * half about X=0 so the full, balanced profile is
+                     * shown on screen, point-for-point / arc-for-arc
+                     * matching what forged_closed_polygon_image() now
+                     * fills by default. */
+                    if (!obj->has_centerline && !self_closed) {
+                        for (int k = 0; k + 1 < vn; k++) {
+                            float mx1 = img_to_vp_x(obj->verts_x[k])     + ox;
+                            float my1 = img_to_vp_y(-obj->verts_y[k])    + oy;
+                            float mx2 = img_to_vp_x(obj->verts_x[k+1])   + ox;
+                            float my2 = img_to_vp_y(-obj->verts_y[k+1])  + oy;
+                            draw_line_seg(layer, (int32_t)mx1, (int32_t)my1,
+                                        (int32_t)mx2, (int32_t)my2, line_col, line_w);
+                        }
                     }
 
                     /* Center line — drawn unconditionally here, after the fill/
@@ -1282,6 +1363,15 @@ static void format_mm_trimmed(char *buf, size_t bufsz, float val)
     if (p > buf && *p == '.') { *p = '\0'; }
 }
 
+/* X in the Forged dialog is a total diameter; each point is stored
+ * at radius (X/2) internally. This converts back to the diameter mm
+ * value for display — mirrors the copy in events.c (kept as a
+ * separate static inline since each .c file needs its own). */
+static inline float forged_display_x_mm(float y_px)
+{
+    return img_to_mm_y(y_px) * 2.0f;
+}
+
 /* Renders one Forged segment (line or arc) with CNC-style coordinate
  * labels and an angle glyph for arcs. Shared by the in-progress
  * preview and the committed OBJ_FORGED render path. */
@@ -1349,9 +1439,9 @@ static void draw_forged_segment(lv_layer_t *layer, int32_t ox, int32_t oy,
 
     if (show_labels) {
         char x1s[16], z1s[16], x2s[16], z2s[16];
-        format_mm_trimmed(x1s, sizeof(x1s), img_to_mm_y(seg->y1));
+        format_mm_trimmed(x1s, sizeof(x1s), forged_display_x_mm(seg->y1));
         format_mm_trimmed(z1s, sizeof(z1s), img_to_mm_x(seg->x1));
-        format_mm_trimmed(x2s, sizeof(x2s), img_to_mm_y(seg->y2));
+        format_mm_trimmed(x2s, sizeof(x2s), forged_display_x_mm(seg->y2));
         format_mm_trimmed(z2s, sizeof(z2s), img_to_mm_x(seg->x2));
 
         char buf1[40], buf2[40];

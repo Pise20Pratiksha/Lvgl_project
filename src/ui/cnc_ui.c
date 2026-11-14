@@ -19,6 +19,7 @@
 #include "cnc_sketch.h"
 
 #include "cnc_dxf.h"              /* NEW: declares cnc_sketch_save_dxf() */
+#include "cnc_dwg.h"
 #include "viewer_dxf_review.h"    /* NEW: declares show_dxf_import_dialog() */
 
 /* =========================================================
@@ -354,12 +355,24 @@ static void btn_save_sketch_event(lv_event_t *e)
          * Bar/Pipe/Forged geometry exactly, unlike the JSON writer. */
         char dxf_name[80];
         snprintf(dxf_name, sizeof(dxf_name), "%s.dxf", filename);
-        if (cnc_sketch_save_dxf(dxf_name)) {
+        bool dxf_ok = cnc_sketch_save_dxf(dxf_name);
+        if (dxf_ok) {
             printf("[btn_save_sketch_event] DXF exported: %s\n", dxf_name);
         }
 
+        bool dwg_ok = cnc_sketch_save_dwg(filename);
+        if (dwg_ok) {
+            printf("[btn_save_sketch_event] DWG exported: %s.dwg\n", filename);
+        }
+
         if (g_cnc.lbl_tool) {
-            lv_label_set_text(g_cnc.lbl_tool, "✓ Sketch & Image Saved!");
+            if (dxf_ok && dwg_ok) {
+                lv_label_set_text(g_cnc.lbl_tool, "✓ Sketch, DXF & DWG Saved!");
+            } else if (dxf_ok) {
+                lv_label_set_text(g_cnc.lbl_tool, "✓ Sketch & DXF Saved (DWG failed — see log)");
+            } else {
+                lv_label_set_text(g_cnc.lbl_tool, "✓ Sketch Saved (DXF/DWG failed — see log)");
+            }
             lv_obj_set_style_text_color(g_cnc.lbl_tool, C_GREEN, 0);
         }
     }
@@ -492,11 +505,11 @@ static void btn_settings_event(lv_event_t *e)
     lv_obj_set_style_text_color(hdr, C_CYAN, 0);
     lv_obj_set_style_text_font(hdr, &lv_font_montserrat_12, 0);
 
-    lv_obj_t *msg = lv_label_create(modal);
-    lv_label_set_text(msg, "Save or export your sketch from here.");
-    lv_obj_set_width(msg, 200);
-    lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(msg, LV_ALIGN_TOP_MID, 0, 28);
+    // lv_obj_t *msg = lv_label_create(modal);
+    // lv_label_set_text(msg, "Save or export your sketch from here.");
+    // lv_obj_set_width(msg, 200);
+    // lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
+    // lv_obj_align(msg, LV_ALIGN_TOP_MID, 0, 28);
 
     lv_obj_t *btn_row = lv_obj_create(modal);
     lv_obj_set_size(btn_row, 200, 44);
@@ -583,11 +596,11 @@ void show_settings_modal(void)
     lv_obj_set_style_text_color(hdr, C_CYAN, 0);
     lv_obj_set_style_text_font(hdr, &lv_font_montserrat_12, 0);
 
-    lv_obj_t *msg = lv_label_create(modal);
-    lv_label_set_text(msg, "Save or export your sketch from here.");
-    lv_obj_set_width(msg, 200);
-    lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_align(msg, LV_ALIGN_TOP_MID, 0, 28);
+    // lv_obj_t *msg = lv_label_create(modal);
+    // lv_label_set_text(msg, "Save or export your sketch from here.");
+    // lv_obj_set_width(msg, 200);
+    // lv_obj_set_style_text_align(msg, LV_TEXT_ALIGN_CENTER, 0);
+    // lv_obj_align(msg, LV_ALIGN_TOP_MID, 0, 28);
 
     lv_obj_t *btn_row = lv_obj_create(modal);
     lv_obj_set_size(btn_row, 200, 44);

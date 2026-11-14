@@ -903,6 +903,7 @@ static int find_nearest_object(float vx, float vy)
 static void compute_arc_center(ForgedSegment *seg);
 static void forged_dialog_abort_event(lv_event_t *e);
 static void update_forged_start_label(void);
+bool forged_build_undo(void);
 
 static PatternFillType g_pattern_fill_selected = PATTERN_FILL_LINE;
 static lv_obj_t       *g_pattern_menu = NULL;
@@ -2472,6 +2473,22 @@ static void format_mm_trimmed(char *buf, size_t bufsz, float val)
 }
 
 
+/* X in the Forged dialog is a total diameter, standard CNC-lathe
+ * convention. Internally each point is stored at radius (X/2) so it
+ * mirrors cleanly about the centerline. This converts a stored
+ * radius (image px) back to the diameter mm value the user typed,
+ * for every place that redisplays it in a field or label. */
+static inline float forged_display_x_mm(float y_px)
+{
+    return img_to_mm_y(y_px) * 2.0f;
+}
+/* Z in the Forged dialog is the length axis (image-x). Unlike X, it's
+ * not halved/mirrored — it maps straight through img_to_mm_x(). */
+static inline float forged_display_z_mm(float x_px)
+{
+    return img_to_mm_x(x_px);
+}
+
 static void forged_dialog_kb_event(lv_event_t *e)
 {
     lv_obj_t *ta = lv_event_get_target(e);
@@ -2488,24 +2505,54 @@ static void forged_dialog_kb_event(lv_event_t *e)
 //     forged_dialog_abort_event(e);   /* always close + discard, regardless of seg_count */
 // }
 
+// static void forged_dialog_cancel_event(lv_event_t *e)
+// {
+//     (void)e;
+
+//     // if (g.forged_seg_count <= 0) {
+//     //     forged_dialog_abort_event(e);
+//     //     return;
+//     // }
+
+//     char buf[32];
+//     format_mm_trimmed(buf, sizeof(buf), img_to_mm_y(g.forged_cur_y));
+//     lv_textarea_set_text(g_forged_ta_x1, buf);
+//     format_mm_trimmed(buf, sizeof(buf), img_to_mm_x(g.forged_cur_x));
+//     lv_textarea_set_text(g_forged_ta_z1, buf);
+//     lv_textarea_set_text(g_forged_ta_x2, "");
+//     lv_textarea_set_text(g_forged_ta_z2, "");
+//     if (g_forged_ta_angle) lv_textarea_set_text(g_forged_ta_angle, "");
+//     if (g_forged_err_lbl)  lv_obj_add_flag(g_forged_err_lbl, LV_OBJ_FLAG_HIDDEN);
+// }
+
 static void forged_dialog_cancel_event(lv_event_t *e)
 {
     (void)e;
 
-    // if (g.forged_seg_count <= 0) {
-    //     forged_dialog_abort_event(e);
-    //     return;
-    // }
+    /* Cancel = step-by-step Undo, scoped to this Forged part only.
+     * Each press removes just the most recently added segment (line
+     * or arc), leaving every earlier segment fully intact and still
+     * part of the editable in-progress chain. This never touches
+     * g.draw_objects[] (already-committed shapes already on the
+     * canvas) or any other tool/mode's state — forged_build_undo()
+     * itself refuses to run unless g.mode == MODE_FORGED. */
+    if (forged_build_undo()) {
+        /* Clear the End-point/Angle fields so the dialog doesn't show
+         * stale values for a segment that no longer exists. Start
+         * (X1/Z1) is already re-synced to the new last point inside
+         * forged_build_undo(). */
+        if (g_forged_ta_x2)    lv_textarea_set_text(g_forged_ta_x2, "");
+        if (g_forged_ta_z2)    lv_textarea_set_text(g_forged_ta_z2, "");
+        if (g_forged_ta_angle) lv_textarea_set_text(g_forged_ta_angle, "");
+        if (g_forged_err_lbl)  lv_obj_add_flag(g_forged_err_lbl, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
 
-    char buf[32];
-    format_mm_trimmed(buf, sizeof(buf), img_to_mm_y(g.forged_cur_y));
-    lv_textarea_set_text(g_forged_ta_x1, buf);
-    format_mm_trimmed(buf, sizeof(buf), img_to_mm_x(g.forged_cur_x));
-    lv_textarea_set_text(g_forged_ta_z1, buf);
-    lv_textarea_set_text(g_forged_ta_x2, "");
-    lv_textarea_set_text(g_forged_ta_z2, "");
-    if (g_forged_ta_angle) lv_textarea_set_text(g_forged_ta_angle, "");
-    if (g_forged_err_lbl)  lv_obj_add_flag(g_forged_err_lbl, LV_OBJ_FLAG_HIDDEN);
+    /* Nothing left to undo — no segments exist yet in this part, so
+     * there's nothing to preserve. Equivalent to aborting a part that
+     * was never started (closes the dialog, returns to Pan). This is
+     * the ONLY case where Cancel closes anything. */
+    forged_dialog_abort_event(e);
 }
 
 static void forged_dialog_add_event(lv_event_t *e)
@@ -2551,9 +2598,9 @@ static void forged_dialog_add_event(lv_event_t *e)
     ForgedSegment *seg = &g.forged_segs[g.forged_seg_count];
     seg->type = g_forged_type;
     seg->x1 = z1_mm / MM_PER_PX_X;
-    seg->y1 = x1_mm / MM_PER_PX_Y;
+    seg->y1 = (x1_mm * 0.5f) / MM_PER_PX_Y;
     seg->x2 = z2_mm / MM_PER_PX_X;
-    seg->y2 = x2_mm / MM_PER_PX_Y;
+    seg->y2 = (x2_mm * 0.5f) / MM_PER_PX_Y;
 
     if (g_forged_type == FSEG_ARC) {
         seg->angle_deg = angle_deg;
@@ -2573,9 +2620,9 @@ static void forged_dialog_add_event(lv_event_t *e)
     /* Chain: pre-fill next Start with this segment's End, but leave it
      * editable — the user can override it to start a disjoint segment. */
     char buf[32];
-    format_mm_trimmed(buf, sizeof(buf), img_to_mm_y(g.forged_cur_y));
+    format_mm_trimmed(buf, sizeof(buf), forged_display_x_mm(g.forged_cur_y));
     lv_textarea_set_text(g_forged_ta_x1, buf);
-    format_mm_trimmed(buf, sizeof(buf), img_to_mm_x(g.forged_cur_x));
+    format_mm_trimmed(buf, sizeof(buf), forged_display_z_mm(g.forged_cur_x));
     lv_textarea_set_text(g_forged_ta_z1, buf);
 
     lv_textarea_set_text(g_forged_ta_x2, "");
@@ -2665,9 +2712,9 @@ bool forged_build_undo(void)
 
     if (g_forged_ta_x1 && g_forged_ta_z1) {
         char buf[32];
-        format_mm_trimmed(buf, sizeof(buf), img_to_mm_y(g.forged_cur_y));
+        format_mm_trimmed(buf, sizeof(buf), forged_display_x_mm(g.forged_cur_y));
         lv_textarea_set_text(g_forged_ta_x1, buf);
-        format_mm_trimmed(buf, sizeof(buf), img_to_mm_x(g.forged_cur_x));
+        format_mm_trimmed(buf, sizeof(buf), forged_display_z_mm(g.forged_cur_x));
         lv_textarea_set_text(g_forged_ta_z1, buf);
     }
     update_forged_start_label();
@@ -2691,9 +2738,9 @@ bool forged_build_redo(void)
 
     if (g_forged_ta_x1 && g_forged_ta_z1) {
         char buf[32];
-        format_mm_trimmed(buf, sizeof(buf), img_to_mm_y(g.forged_cur_y));
+        format_mm_trimmed(buf, sizeof(buf), forged_display_x_mm(g.forged_cur_y));
         lv_textarea_set_text(g_forged_ta_x1, buf);
-        format_mm_trimmed(buf, sizeof(buf), img_to_mm_x(g.forged_cur_x));
+        format_mm_trimmed(buf, sizeof(buf), forged_display_z_mm(g.forged_cur_x));
         lv_textarea_set_text(g_forged_ta_z1, buf);
     }
     update_forged_start_label();
@@ -2900,9 +2947,11 @@ void show_forged_segment_dialog(void)
     lv_textarea_set_text(g_forged_ta_z1, "");
     } else {
         char buf[32];
-        format_mm_trimmed(buf, sizeof(buf), img_to_mm_y(g.forged_cur_y));
+        // format_mm_trimmed(buf, sizeof(buf), img_to_mm_y(g.forged_cur_y));
+        // lv_textarea_set_text(g_forged_ta_x1, buf);
+        format_mm_trimmed(buf, sizeof(buf), forged_display_x_mm(g.forged_cur_y));
         lv_textarea_set_text(g_forged_ta_x1, buf);
-        format_mm_trimmed(buf, sizeof(buf), img_to_mm_x(g.forged_cur_x));
+        format_mm_trimmed(buf, sizeof(buf), forged_display_z_mm(g.forged_cur_x));
         lv_textarea_set_text(g_forged_ta_z1, buf);
     }
 
